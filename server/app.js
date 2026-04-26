@@ -1,15 +1,47 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const express = require("express");
 const cookieParser = require("cookie-parser");
 const { DEFAULT_DB_FILE, openDatabase } = require("../db");
 
+const PUBLIC_FILES = new Set([
+  "index.html",
+  "login.html",
+  "notes.html",
+  "settings.html",
+  "admin.html"
+]);
+
 function sendPublicFile(response, fileName) {
+  if (!PUBLIC_FILES.has(fileName)) {
+    response.status(404).send("Not found");
+    return;
+  }
+
   response.sendFile(path.join(__dirname, "..", "public", fileName));
 }
 
 function createSessionId() {
-  return `SESSION-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
+  return `SESSION-${crypto.randomBytes(32).toString("hex")}`;
+}
+
+function cleanString(value, maxLength) {
+  const text = String(value || "");
+
+  if (text.length > maxLength) {
+    return null;
+  }
+
+  return text;
+}
+
+function parseBool(value) {
+  if (value === true || value === "true" || value === "1" || value === 1) {
+    return 1;
+  }
+
+  return 0;
 }
 
 async function createApp() {
@@ -74,6 +106,20 @@ async function createApp() {
     next();
   }
 
+  function requireAdmin(request, response, next) {
+    if (!request.currentUser) {
+      response.status(401).json({ error: "Authentication required." });
+      return;
+    }
+
+    if (request.currentUser.role !== "admin") {
+      response.status(403).json({ error: "Admin access required." });
+      return;
+    }
+
+    next();
+  }
+
   app.get("/", (_request, response) => sendPublicFile(response, "index.html"));
   app.get("/login", (_request, response) => sendPublicFile(response, "login.html"));
   app.get("/notes", (_request, response) => sendPublicFile(response, "notes.html"));
@@ -85,31 +131,44 @@ async function createApp() {
   });
 
   app.post("/api/login", async (request, response) => {
-    const username = String(request.body.username || "");
-    const password = String(request.body.password || "");
+    const username = cleanString(request.body.username, 80);
+    const password = cleanString(request.body.password, 200);
 
-    const query = `
-      SELECT id, username, role, display_name
-      FROM users
-      WHERE username = '${username}' AND password = '${password}'
-    `;
-    const user = await db.get(query);
+    if (username === null || password === null) {
+      response.status(400).json({ error: "Invalid username or password." });
+      return;
+    }
+
+    const user = await db.get(
+      `
+        SELECT id, username, role, display_name
+        FROM users
+        WHERE username = ? AND password = ?
+      `,
+      [username, password]
+    );
 
     if (!user) {
       response.status(401).json({ error: "Invalid username or password." });
       return;
     }
 
-    const sessionId = request.cookies.sid || createSessionId();
+    if (request.cookies.sid) {
+      await db.run("DELETE FROM sessions WHERE id = ?", [request.cookies.sid]);
+    }
 
-    await db.run("DELETE FROM sessions WHERE id = ?", [sessionId]);
+    const sessionId = createSessionId();
+
     await db.run(
       "INSERT INTO sessions (id, user_id, created_at) VALUES (?, ?, ?)",
       [sessionId, user.id, new Date().toISOString()]
     );
 
     response.cookie("sid", sessionId, {
-      path: "/"
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production"
     });
 
     response.json({
@@ -128,42 +187,58 @@ async function createApp() {
       await db.run("DELETE FROM sessions WHERE id = ?", [request.cookies.sid]);
     }
 
-    response.clearCookie("sid");
+    response.clearCookie("sid", {
+      path: "/",
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production"
+    });
+
     response.json({ ok: true });
   });
 
   app.get("/api/notes", requireAuth, async (request, response) => {
-    const ownerId = request.query.ownerId || request.currentUser.id;
-    const search = request.query.search || "";
+    const search = cleanString(request.query.search, 200);
 
-    const notes = await db.all(`
-      SELECT
-        notes.id,
-        notes.owner_id AS ownerId,
-        users.username AS ownerUsername,
-        notes.title,
-        notes.body,
-        notes.pinned,
-        notes.created_at AS createdAt
-      FROM notes
-      JOIN users ON users.id = notes.owner_id
-      WHERE notes.owner_id = ${ownerId}
-        AND (notes.title LIKE '%${search}%' OR notes.body LIKE '%${search}%')
-      ORDER BY notes.pinned DESC, notes.id DESC
-    `);
+    if (search === null) {
+      response.status(400).json({ error: "Invalid search." });
+      return;
+    }
+
+    const notes = await db.all(
+      `
+        SELECT
+          notes.id,
+          notes.owner_id AS ownerId,
+          users.username AS ownerUsername,
+          notes.title,
+          notes.body,
+          notes.pinned,
+          notes.created_at AS createdAt
+        FROM notes
+        JOIN users ON users.id = notes.owner_id
+        WHERE notes.owner_id = ?
+          AND (notes.title LIKE ? OR notes.body LIKE ?)
+        ORDER BY notes.pinned DESC, notes.id DESC
+      `,
+      [request.currentUser.id, `%${search}%`, `%${search}%`]
+    );
 
     response.json({ notes });
   });
 
   app.post("/api/notes", requireAuth, async (request, response) => {
-    const ownerId = Number(request.body.ownerId || request.currentUser.id);
-    const title = String(request.body.title || "");
-    const body = String(request.body.body || "");
-    const pinned = request.body.pinned ? 1 : 0;
+    const title = cleanString(request.body.title, 120);
+    const body = cleanString(request.body.body, 5000);
+    const pinned = parseBool(request.body.pinned);
+
+    if (title === null || body === null) {
+      response.status(400).json({ error: "Invalid note content." });
+      return;
+    }
 
     const result = await db.run(
       "INSERT INTO notes (owner_id, title, body, pinned, created_at) VALUES (?, ?, ?, ?, ?)",
-      [ownerId, title, body, pinned, new Date().toISOString()]
+      [request.currentUser.id, title, body, pinned, new Date().toISOString()]
     );
 
     response.status(201).json({
@@ -173,8 +248,6 @@ async function createApp() {
   });
 
   app.get("/api/settings", requireAuth, async (request, response) => {
-    const userId = Number(request.query.userId || request.currentUser.id);
-
     const settings = await db.get(
       `
         SELECT
@@ -189,30 +262,47 @@ async function createApp() {
         JOIN users ON users.id = settings.user_id
         WHERE settings.user_id = ?
       `,
-      [userId]
+      [request.currentUser.id]
     );
 
     response.json({ settings });
   });
 
   app.post("/api/settings", requireAuth, async (request, response) => {
-    const userId = Number(request.body.userId || request.currentUser.id);
-    const displayName = String(request.body.displayName || "");
-    const statusMessage = String(request.body.statusMessage || "");
-    const theme = String(request.body.theme || "classic");
-    const emailOptIn = request.body.emailOptIn ? 1 : 0;
+    const displayName = cleanString(request.body.displayName, 80);
+    const statusMessage = cleanString(request.body.statusMessage, 280);
+    const theme = cleanString(request.body.theme || "classic", 40);
+    const emailOptIn = parseBool(request.body.emailOptIn);
 
-    await db.run("UPDATE users SET display_name = ? WHERE id = ?", [displayName, userId]);
+    if (displayName === null || statusMessage === null || theme === null) {
+      response.status(400).json({ error: "Invalid settings content." });
+      return;
+    }
+
+    if (theme !== "classic" && theme !== "light" && theme !== "dark") {
+      response.status(400).json({ error: "Invalid theme." });
+      return;
+    }
+
+    await db.run("UPDATE users SET display_name = ? WHERE id = ?", [
+      displayName,
+      request.currentUser.id
+    ]);
+
     await db.run(
       "UPDATE settings SET status_message = ?, theme = ?, email_opt_in = ? WHERE user_id = ?",
-      [statusMessage, theme, emailOptIn, userId]
+      [statusMessage, theme, emailOptIn, request.currentUser.id]
     );
 
     response.json({ ok: true });
   });
 
-  app.get("/api/settings/toggle-email", requireAuth, async (request, response) => {
-    const enabled = request.query.enabled === "1" ? 1 : 0;
+  app.get("/api/settings/toggle-email", requireAuth, async (_request, response) => {
+    response.status(405).json({ error: "Use POST instead." });
+  });
+
+  app.post("/api/settings/toggle-email", requireAuth, async (request, response) => {
+    const enabled = parseBool(request.body.enabled);
 
     await db.run("UPDATE settings SET email_opt_in = ? WHERE user_id = ?", [
       enabled,
@@ -226,7 +316,7 @@ async function createApp() {
     });
   });
 
-  app.get("/api/admin/users", requireAuth, async (_request, response) => {
+  app.get("/api/admin/users", requireAdmin, async (_request, response) => {
     const users = await db.all(`
       SELECT
         users.id,
