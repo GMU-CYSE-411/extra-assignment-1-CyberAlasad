@@ -23,7 +23,8 @@ function sendPublicFile(response, fileName) {
 }
 
 function createSessionId() {
-  return `SESSION-${crypto.randomBytes(32).toString("hex")}`;
+  const randomText = crypto.randomBytes(32).toString("hex");
+  return `SESSION-${randomText}`;
 }
 
 function cleanString(value, maxLength) {
@@ -60,6 +61,33 @@ async function createApp() {
   app.use("/css", express.static(path.join(__dirname, "..", "public", "css")));
   app.use("/js", express.static(path.join(__dirname, "..", "public", "js")));
 
+  app.use((request, response, next) => {
+    if (
+      request.method === "GET" ||
+      request.method === "HEAD" ||
+      request.method === "OPTIONS"
+    ) {
+      next();
+      return;
+    }
+
+    const origin = request.get("origin");
+
+    if (!origin) {
+      next();
+      return;
+    }
+
+    const correctOrigin = `${request.protocol}://${request.get("host")}`;
+
+    if (origin !== correctOrigin) {
+      response.status(403).json({ error: "Invalid origin." });
+      return;
+    }
+
+    next();
+  });
+
   app.use(async (request, response, next) => {
     const sessionId = request.cookies.sid;
 
@@ -84,15 +112,19 @@ async function createApp() {
       [sessionId]
     );
 
-    request.currentUser = row
-      ? {
-          sessionId: row.session_id,
-          id: row.id,
-          username: row.username,
-          role: row.role,
-          displayName: row.display_name
-        }
-      : null;
+    if (!row) {
+      request.currentUser = null;
+      next();
+      return;
+    }
+
+    request.currentUser = {
+      sessionId: row.session_id,
+      id: row.id,
+      username: row.username,
+      role: row.role,
+      displayName: row.display_name
+    };
 
     next();
   });
@@ -120,11 +152,25 @@ async function createApp() {
     next();
   }
 
-  app.get("/", (_request, response) => sendPublicFile(response, "index.html"));
-  app.get("/login", (_request, response) => sendPublicFile(response, "login.html"));
-  app.get("/notes", (_request, response) => sendPublicFile(response, "notes.html"));
-  app.get("/settings", (_request, response) => sendPublicFile(response, "settings.html"));
-  app.get("/admin", (_request, response) => sendPublicFile(response, "admin.html"));
+  app.get("/", (_request, response) => {
+    sendPublicFile(response, "index.html");
+  });
+
+  app.get("/login", (_request, response) => {
+    sendPublicFile(response, "login.html");
+  });
+
+  app.get("/notes", (_request, response) => {
+    sendPublicFile(response, "notes.html");
+  });
+
+  app.get("/settings", (_request, response) => {
+    sendPublicFile(response, "settings.html");
+  });
+
+  app.get("/admin", (_request, response) => {
+    sendPublicFile(response, "admin.html");
+  });
 
   app.get("/api/me", (request, response) => {
     response.json({ user: request.currentUser });
@@ -237,7 +283,11 @@ async function createApp() {
     }
 
     const result = await db.run(
-      "INSERT INTO notes (owner_id, title, body, pinned, created_at) VALUES (?, ?, ?, ?, ?)",
+      `
+        INSERT INTO notes
+          (owner_id, title, body, pinned, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `,
       [request.currentUser.id, title, body, pinned, new Date().toISOString()]
     );
 
@@ -284,13 +334,17 @@ async function createApp() {
       return;
     }
 
-    await db.run("UPDATE users SET display_name = ? WHERE id = ?", [
-      displayName,
-      request.currentUser.id
-    ]);
+    await db.run(
+      "UPDATE users SET display_name = ? WHERE id = ?",
+      [displayName, request.currentUser.id]
+    );
 
     await db.run(
-      "UPDATE settings SET status_message = ?, theme = ?, email_opt_in = ? WHERE user_id = ?",
+      `
+        UPDATE settings
+        SET status_message = ?, theme = ?, email_opt_in = ?
+        WHERE user_id = ?
+      `,
       [statusMessage, theme, emailOptIn, request.currentUser.id]
     );
 
@@ -304,10 +358,10 @@ async function createApp() {
   app.post("/api/settings/toggle-email", requireAuth, async (request, response) => {
     const enabled = parseBool(request.body.enabled);
 
-    await db.run("UPDATE settings SET email_opt_in = ? WHERE user_id = ?", [
-      enabled,
-      request.currentUser.id
-    ]);
+    await db.run(
+      "UPDATE settings SET email_opt_in = ? WHERE user_id = ?",
+      [enabled, request.currentUser.id]
+    );
 
     response.json({
       ok: true,
