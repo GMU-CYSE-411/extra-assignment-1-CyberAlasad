@@ -1,11 +1,23 @@
 function noteCard(note) {
-  return `
-    <article class="note-card">
-      <h3>${note.title}</h3>
-      <p class="note-meta">Owner: ${note.ownerUsername} | ID: ${note.id} | Pinned: ${note.pinned}</p>
-      <div class="note-body">${note.body}</div>
-    </article>
-  `;
+  const article = document.createElement("article");
+  article.className = "note-card";
+
+  const title = document.createElement("h3");
+  title.textContent = note.title;
+
+  const meta = document.createElement("p");
+  meta.className = "note-meta";
+  meta.textContent = `Owner: ${note.ownerUsername} | ID: ${note.id} | Pinned: ${note.pinned}`;
+
+  const body = document.createElement("div");
+  body.className = "note-body";
+  body.textContent = note.body;
+
+  article.appendChild(title);
+  article.appendChild(meta);
+  article.appendChild(body);
+
+  return article;
 }
 
 async function loadNotes(ownerId, search) {
@@ -21,7 +33,12 @@ async function loadNotes(ownerId, search) {
 
   const result = await api(`/api/notes?${query.toString()}`);
   const notesList = document.getElementById("notes-list");
-  notesList.innerHTML = result.notes.map(noteCard).join("");
+
+  notesList.replaceChildren();
+
+  for (const note of result.notes) {
+    notesList.appendChild(noteCard(note));
+  }
 }
 
 (async function bootstrapNotes() {

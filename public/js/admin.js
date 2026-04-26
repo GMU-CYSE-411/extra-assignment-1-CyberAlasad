@@ -15,19 +15,21 @@
     }
 
     const result = await api("/api/admin/users");
-    document.getElementById("admin-users").innerHTML = result.users
-      .map(
-        (entry) => `
-          <tr>
-            <td>${entry.id}</td>
-            <td>${entry.username}</td>
-            <td>${entry.role}</td>
-            <td>${entry.displayName}</td>
-            <td>${entry.noteCount}</td>
-          </tr>
-        `
-      )
-      .join("");
+    const adminUsers = document.getElementById("admin-users");
+
+    adminUsers.replaceChildren();
+
+    result.users.forEach((entry) => {
+      const row = document.createElement("tr");
+
+      [entry.id, entry.username, entry.role, entry.displayName, entry.noteCount].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      });
+
+      adminUsers.appendChild(row);
+    });
   } catch (error) {
     document.getElementById("admin-warning").textContent = error.message;
   }
