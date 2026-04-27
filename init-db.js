@@ -26,6 +26,7 @@ async function initializeDatabase() {
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
       user_id INTEGER NOT NULL,
+      csrf_token TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY(user_id) REFERENCES users(id)
     )
